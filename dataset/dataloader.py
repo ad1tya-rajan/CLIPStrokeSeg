@@ -1,6 +1,7 @@
 from monai.transforms import (
     AsDiscrete,
-    AddChanneld,
+    # AddChanneld,
+    EnsureChannelFirstd,
     Compose,
     CropForegroundd,
     LoadImaged,
@@ -18,6 +19,8 @@ from monai.transforms import (
     apply_transform,
     RandZoomd,
     RandCropByLabelClassesd,
+    ResampleToMatchd,
+    ConcatItemsd
 )
 
 import collections.abc
@@ -25,6 +28,7 @@ import math
 import pickle
 import shutil
 import sys
+import os
 import tempfile
 import threading
 import time
@@ -223,178 +227,116 @@ class Compose_Select(Compose):
             input_ = apply_transform(_transform, input_, self.map_items, self.unpack_items, self.log_stats)
         return input_
 
+"""
+@TODO:
+- modify get_loader to support ISLES MRI data
+- ignore using LoadImage5hd, use LoadImaged instead
+- update data dict creation to ignore post_label since ISLES MRI data does not have post_label
+- support MRI path and modality in data_dicts creation
+- modify datasetkey since we are not doing multi-class segmentation
+"""
+
 def get_loader(args):
-    train_transforms = Compose(
-        [
-            LoadImageh5d(keys=["image", "label"]), #0
-            AddChanneld(keys=["image", "label"]),
-            Orientationd(keys=["image", "label"], axcodes="RAS"),
-            Spacingd(
-                keys=["image", "label"],
-                pixdim=(args.space_x, args.space_y, args.space_z),
-                mode=("bilinear", "nearest"),
-            ), # process h5 to here
-            ScaleIntensityRanged(
-                keys=["image"],
-                a_min=args.a_min,
-                a_max=args.a_max,
-                b_min=args.b_min,
-                b_max=args.b_max,
-                clip=True,
-            ),
-            CropForegroundd(keys=["image", "label", "post_label"], source_key="image"),
-            SpatialPadd(keys=["image", "label", "post_label"], spatial_size=(args.roi_x, args.roi_y, args.roi_z), mode='constant'),
-            RandZoomd_select(keys=["image", "label", "post_label"], prob=0.3, min_zoom=1.3, max_zoom=1.5, mode=['area', 'nearest', 'nearest']), # 7
-            RandCropByPosNegLabeld_select(
-                keys=["image", "label", "post_label"],
-                label_key="label",
-                spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-                pos=2,
-                neg=1,
-                num_samples=args.num_samples,
-                image_key="image",
-                image_threshold=0,
-            ), # 8
-            RandCropByLabelClassesd_select(
-                keys=["image", "label", "post_label"],
-                label_key="label",
-                spatial_size=(args.roi_x, args.roi_y, args.roi_z), #192, 192, 64
-                ratios=[1, 1, 5],
-                num_classes=3,
-                num_samples=args.num_samples,
-                image_key="image",
-                image_threshold=0,
-            ), # 9
-            RandRotate90d(
-                keys=["image", "label", "post_label"],
-                prob=0.10,
-                max_k=3,
-            ),
-            RandShiftIntensityd(
-                keys=["image"],
-                offsets=0.10,
-                prob=0.20,
-            ),
-            ToTensord(keys=["image", "label", "post_label"]),
-        ]
-    )
+    # ---------- Transforms ----------
+    train_transforms = Compose([
+        LoadImaged(keys=["flair", "adc", "dwi", "label"]),
+        EnsureChannelFirstd(keys=["flair", "adc", "dwi", "label"]),
+        ResampleToMatchd(keys=["flair", "adc", "dwi"], key_dst="label", mode="bilinear"),
+        ConcatItemsd(keys=["flair", "adc", "dwi"], name="image", dim=0),
+        Orientationd(keys=["image", "label"], axcodes="RAS"),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=args.a_min, a_max=args.a_max,
+            b_min=args.b_min, b_max=args.b_max,
+            clip=True,
+        ),
+        CropForegroundd(keys=["image", "label"], source_key="image"),
+        RandCropByPosNegLabeld(
+            keys=["image", "label"],
+            label_key="label",
+            spatial_size=(args.roi_x, args.roi_y, args.roi_z),
+            pos=2, neg=1, num_samples=args.num_samples,
+            allow_smaller=True
+        ),
+        RandRotate90d(keys=["image", "label"], prob=0.1, max_k=3),
+        RandShiftIntensityd(keys=["image"], offsets=0.1, prob=0.2),
+        ToTensord(keys=["image", "label"]),
+    ])
 
-    val_transforms = Compose(
-        [
-            LoadImageh5d(keys=["image", "label"]),
-            AddChanneld(keys=["image", "label"]),
-            Orientationd(keys=["image", "label"], axcodes="RAS"),
-            # ToTemplatelabeld(keys=['label']),
-            # RL_Splitd(keys=['label']),
-            Spacingd(
-                keys=["image", "label"],
-                pixdim=(args.space_x, args.space_y, args.space_z),
-                mode=("bilinear", "nearest"),
-            ), # process h5 to here
-            ScaleIntensityRanged(
-                keys=["image"],
-                a_min=args.a_min,
-                a_max=args.a_max,
-                b_min=args.b_min,
-                b_max=args.b_max,
-                clip=True,
-            ),
-            CropForegroundd(keys=["image", "label", "post_label"], source_key="image"),
-            ToTensord(keys=["image", "label", "post_label"]),
-        ]
-    )
+    val_transforms = Compose([
+        LoadImaged(keys=["flair", "adc", "dwi", "label"]),
+        EnsureChannelFirstd(keys=["flair", "adc", "dwi", "label"]),
+        ResampleToMatchd(keys=["flair", "adc", "dwi"], key_dst="label", mode="bilinear"),
+        ConcatItemsd(keys=["flair", "adc", "dwi"], name="image", dim=0),
+        Orientationd(keys=["image", "label"], axcodes="RAS"),
+        ScaleIntensityRanged(
+            keys=["image"],
+            a_min=args.a_min, a_max=args.a_max,
+            b_min=args.b_min, b_max=args.b_max,
+            clip=True,
+        ),
+        CropForegroundd(keys=["image", "label"], source_key="image"),
+        ToTensord(keys=["image", "label"]),
+    ])
 
-    ## training dict part
-    train_img = []
-    train_lbl = []
-    train_post_lbl = []
-    train_name = []
-
-    for item in args.dataset_list:
-        for line in open(args.data_txt_path + item +'_train.txt'):
-            name = line.strip().split()[1].split('.')[0]
-            train_img.append(args.data_root_path + line.strip().split()[0])
-            train_lbl.append(args.data_root_path + line.strip().split()[1])
-            train_post_lbl.append(args.data_root_path + name.replace('label', 'post_label') + '.h5')
-            train_name.append(name)
-    data_dicts_train = [{'image': image, 'label': label, 'post_label': post_label, 'name': name}
-                for image, label, post_label, name in zip(train_img, train_lbl, train_post_lbl, train_name)]
-    print('train len {}'.format(len(data_dicts_train)))
+    # ---------- Helper for parsing ISLES txt files ----------
+    def parse_split_file(split_name):
+        file_path = os.path.join(args.data_txt_path, f"{args.dataset_list[0]}_{split_name}.txt")
+        samples = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                image_str, label_path = line.strip().split()
+                flair_path, adc_path, dwi_path = image_str.split(',')
+                flair_path = os.path.join(args.data_root_path, flair_path)
+                adc_path = os.path.join(args.data_root_path, adc_path)
+                dwi_path = os.path.join(args.data_root_path, dwi_path)
+                label_path = os.path.join(args.data_root_path, label_path)
+                name = os.path.basename(label_path).split('_msk')[0]
+                samples.append({
+                    'flair': flair_path,
+                    'adc': adc_path,
+                    'dwi': dwi_path,
+                    'label': label_path,
+                    'name': name
+                })
+        return samples
 
 
-    ## validation dict part
-    val_img = []
-    val_lbl = []
-    val_post_lbl = []
-    val_name = []
-    for item in args.dataset_list:
-        for line in open(args.data_txt_path + item +'_val.txt'):
-            name = line.strip().split()[1].split('.')[0]
-            val_img.append(args.data_root_path + line.strip().split()[0])
-            val_lbl.append(args.data_root_path + line.strip().split()[1])
-            val_post_lbl.append(args.data_root_path + name.replace('label', 'post_label') + '.h5')
-            val_name.append(name)
-    data_dicts_val = [{'image': image, 'label': label, 'post_label': post_label, 'name': name}
-                for image, label, post_label, name in zip(val_img, val_lbl, val_post_lbl, val_name)]
-    print('val len {}'.format(len(data_dicts_val)))
-
-
-    ## test dict part
-    test_img = []
-    test_lbl = []
-    test_post_lbl = []
-    test_name = []
-    for item in args.dataset_list:
-        for line in open(args.data_txt_path + item +'_test.txt'):
-            name = line.strip().split()[1].split('.')[0]
-            test_img.append(args.data_root_path + line.strip().split()[0])
-            test_lbl.append(args.data_root_path + line.strip().split()[1])
-            test_post_lbl.append(args.data_root_path + name.replace('label', 'post_label') + '.h5')
-            test_name.append(name)
-    data_dicts_test = [{'image': image, 'label': label, 'post_label': post_label, 'name': name}
-                for image, label, post_label, name in zip(test_img, test_lbl, test_post_lbl, test_name)]
-    print('test len {}'.format(len(data_dicts_test)))
-
+    # ---------- Phase-specific logic ----------
     if args.phase == 'train':
-        if args.cache_dataset:
-            if args.uniform_sample:
-                train_dataset = UniformCacheDataset(data=data_dicts_train, transform=train_transforms, cache_rate=args.cache_rate, datasetkey=args.datasetkey)
-            else:
-                train_dataset = CacheDataset(data=data_dicts_train, transform=train_transforms, cache_rate=args.cache_rate)
-        else:
-            if args.uniform_sample:
-                train_dataset = UniformDataset(data=data_dicts_train, transform=train_transforms, datasetkey=args.datasetkey)
-            else:
-                train_dataset = Dataset(data=data_dicts_train, transform=train_transforms)
-        train_sampler = DistributedSampler(dataset=train_dataset, even_divisible=True, shuffle=True) if args.dist else None
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None), num_workers=args.num_workers, 
-                                    collate_fn=list_data_collate, sampler=train_sampler)
-        return train_loader, train_sampler
-    
-    
-    if args.phase == 'validation':
-        if args.cache_dataset:
-            val_dataset = CacheDataset(data=data_dicts_val, transform=val_transforms, cache_rate=args.cache_rate)
-        else:
-            val_dataset = Dataset(data=data_dicts_val, transform=val_transforms)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=list_data_collate)
-        return val_loader, val_transforms
-    
-    
-    if args.phase == 'test':
-        if args.cache_dataset:
-            test_dataset = CacheDataset(data=data_dicts_test, transform=val_transforms, cache_rate=args.cache_rate)
-        else:
-            test_dataset = Dataset(data=data_dicts_test, transform=val_transforms)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=list_data_collate)
-        return test_loader, val_transforms
+        train_dicts = parse_split_file('train')
+        print(f"Loaded {len(train_dicts)} training samples")
+        dataset = CacheDataset(data=train_dicts, transform=train_transforms, cache_rate=args.cache_rate) \
+            if args.cache_dataset else Dataset(data=train_dicts, transform=train_transforms)
+        loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
+                            num_workers=args.num_workers, collate_fn=list_data_collate)
+        return loader, None
+
+    elif args.phase == 'validation':
+        val_dicts = parse_split_file('val')
+        print(f"Loaded {len(val_dicts)} validation samples")
+        dataset = CacheDataset(data=val_dicts, transform=val_transforms, cache_rate=args.cache_rate) \
+            if args.cache_dataset else Dataset(data=val_dicts, transform=val_transforms)
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=list_data_collate)
+        return loader, val_transforms
+
+    elif args.phase == 'test':
+        test_dicts = parse_split_file('test')
+        print(f"Loaded {len(test_dicts)} test samples")
+        dataset = CacheDataset(data=test_dicts, transform=val_transforms, cache_rate=args.cache_rate) \
+            if args.cache_dataset else Dataset(data=test_dicts, transform=val_transforms)
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=list_data_collate)
+        return loader, val_transforms
+
+    else:
+        raise ValueError(f"Unknown phase: {args.phase}")
 
 
 def get_loader_without_gt(args):
     val_transforms = Compose(
         [
             LoadImaged(keys=["image"]),
-            AddChanneld(keys=["image"]),
+            EnsureChannelFirstd(keys=["image"]),
             Orientationd(keys=["image"], axcodes="RAS"),
             # ToTemplatelabeld(keys=['label']),
             # RL_Splitd(keys=['label']),

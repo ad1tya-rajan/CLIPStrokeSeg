@@ -1,3 +1,6 @@
+# TODO: modify forward() to support MRI input, feed mri_txt_encoding.pth as text embedding
+
+
 from typing import Sequence, Tuple, Type, Union
 
 import numpy as np
